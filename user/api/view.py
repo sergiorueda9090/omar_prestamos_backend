@@ -151,8 +151,8 @@ def delete_user(request, user_id = None):
     else:
         return Response({'status': 'Error: Method not allowed'}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
     
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
+#@api_view(['GET'])
+#@permission_classes([IsAuthenticated])
 def get_user_info(request):
     user        = request.user
     serializer  = UserRegisterSerializer(user)
