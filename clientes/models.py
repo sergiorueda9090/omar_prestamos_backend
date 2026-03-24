@@ -32,7 +32,7 @@ class Cliente(models.Model):
     )
     estado = models.CharField(
         max_length=20,
-        choices=[('vigente', 'Vigente'), ('pagado', 'Pagado')],
+        choices=[('vigente', 'Vigente'), ('pagado', 'Pagado'), ('perdido', 'Perdido')],
         default='vigente',
         help_text="Estado actual del credito"
     )
@@ -152,6 +152,7 @@ class HistorialEvento(models.Model):
         ('ampliacion', 'Ampliación'),
         ('liquidacion', 'Liquidación'),
         ('cambio_plazo', 'Cambio de Plazo'),
+        ('cambio_estado', 'Cambio de Estado'),
     ]
 
     cliente     = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name='historial')
