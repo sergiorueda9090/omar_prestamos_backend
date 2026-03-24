@@ -59,4 +59,7 @@ urlpatterns = [
 
     # Exportar Excel completo (v2)
     path('api/v2/exportar/',                                 views.exportar_clientes_excel_v2,     name="exportar_clientes_excel_v2"),
+
+    # Dashboard estadísticas
+    path('api/v2/dashboard/',                                views.dashboard_stats,                name="dashboard_stats"),
 ]

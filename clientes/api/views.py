@@ -1296,3 +1296,98 @@ def exportar_clientes_excel_v2(request):
     response['Content-Disposition'] = 'attachment; filename=reporte_clientes_completo.xlsx'
     wb.save(response)
     return response
+
+
+# =============================================================================
+# 16. DASHBOARD — Estadísticas generales
+# GET /clientes/api/v2/dashboard/
+# =============================================================================
+
+@api_view(['GET'])
+def dashboard_stats(request):
+    from django.db.models import Sum, Count
+
+    clientes = Cliente.objects.all()
+
+    def sumar_campo(qs, campo):
+        total = 0
+        for c in qs:
+            total += parse_money(getattr(c, campo) or '0')
+        return total
+
+    def stats_por_tipo(qs):
+        return {
+            'clientes': qs.count(),
+            'saldo_inversion': sumar_campo(qs, 'monto_prestamo'),
+            'saldo_total': sumar_campo(qs, 'saldo_total_pagar'),
+        }
+
+    # --- Totales generales (solo vigentes) ---
+    vigentes = clientes.filter(estado='vigente')
+    total_inversion = sumar_campo(vigentes, 'monto_prestamo')
+    total_saldo = sumar_campo(vigentes, 'saldo_total_pagar')
+    total_clientes = vigentes.count()
+
+    # --- Por tipo de préstamo (solo vigentes) ---
+    mensual = stats_por_tipo(vigentes.filter(tipo_prestamo='Mensual'))
+    quincenal = stats_por_tipo(vigentes.filter(tipo_prestamo='Quincenal'))
+    semanal = stats_por_tipo(vigentes.filter(tipo_prestamo='Semanal'))
+    diario = stats_por_tipo(vigentes.filter(tipo_prestamo='Diario'))
+
+    # --- Clientes perdidos ---
+    perdidos = clientes.filter(estado='perdido')
+    perdidos_stats = {
+        'clientes': perdidos.count(),
+        'saldo_inversion': sumar_campo(perdidos, 'monto_prestamo'),
+    }
+
+    # --- Clientes pagados ---
+    pagados = clientes.filter(estado='pagado')
+    pagados_stats = {
+        'clientes': pagados.count(),
+        'saldo_inversion': sumar_campo(pagados, 'monto_prestamo'),
+        'saldo_total': sumar_campo(pagados, 'saldo_total_pagar'),
+    }
+
+    # --- Resumen mensual (últimos 6 meses, solo vigentes) ---
+    from datetime import timedelta
+    from django.utils import timezone
+    hoy = timezone.now().date()
+
+    resumen_mensual = []
+    for i in range(5, -1, -1):
+        # Primer día del mes
+        mes = hoy.month - i
+        anio = hoy.year
+        while mes <= 0:
+            mes += 12
+            anio -= 1
+        primer_dia = hoy.replace(year=anio, month=mes, day=1)
+        if mes == 12:
+            ultimo_dia = primer_dia.replace(year=anio + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            ultimo_dia = primer_dia.replace(month=mes + 1, day=1) - timedelta(days=1)
+
+        qs_mes = vigentes.filter(
+            fecha_prestamo__gte=primer_dia,
+            fecha_prestamo__lte=ultimo_dia,
+        )
+        resumen_mensual.append({
+            'mes': primer_dia.strftime('%Y-%m'),
+            'clientes': qs_mes.count(),
+            'saldo_inversion': sumar_campo(qs_mes, 'monto_prestamo'),
+            'saldo_total': sumar_campo(qs_mes, 'saldo_total_pagar'),
+        })
+
+    return Response({
+        'total_inversion': total_inversion,
+        'total_saldo': total_saldo,
+        'total_clientes': total_clientes,
+        'mensual': mensual,
+        'quincenal': quincenal,
+        'semanal': semanal,
+        'diario': diario,
+        'perdidos': perdidos_stats,
+        'pagados': pagados_stats,
+        'resumen_mensual': resumen_mensual,
+    })
