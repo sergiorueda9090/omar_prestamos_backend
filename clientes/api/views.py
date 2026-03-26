@@ -1,11 +1,11 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from clientes.models import Cliente, Cuota, Pago, PagoInteres, HistorialEvento, Ampliacion
+from clientes.models import Cliente, Cuota, Pago, PagoInteres, HistorialEvento, Ampliacion, Nota
 from .serializers import (
     ClienteSerializer, CuotaSerializer,
     PagoSerializer, PagoInteresSerializer, HistorialEventoSerializer,
-    AmpliacionSerializer, ClienteDetalleCompletoSerializer,
+    AmpliacionSerializer, ClienteDetalleCompletoSerializer, NotaSerializer,
 )
 from rest_framework.pagination import PageNumberPagination
 import json
@@ -469,6 +469,7 @@ def registrar_pago(request, cliente_id):
 
     monto = parse_money(request.data.get('monto', '0'))
     fecha_pago = request.data.get('fecha_pago', datetime.now().strftime('%Y-%m-%d'))
+    descripcion = request.data.get('descripcion', '')
 
     if monto <= 0:
         return Response({'error': 'El monto debe ser mayor a 0'}, status=status.HTTP_400_BAD_REQUEST)
@@ -481,12 +482,15 @@ def registrar_pago(request, cliente_id):
         return Response({'error': 'No hay cuotas pendientes'}, status=status.HTTP_400_BAD_REQUEST)
 
     # --- Crear registro de pago ---
+    desc_pago = f"Pago distribuido en cuota(s): {', '.join(['#' + str(d['numero']) for d in distribucion])}"
+    if descripcion:
+        desc_pago += f". {descripcion}"
     Pago.objects.create(
         cliente=cliente,
         tipo_pago='cuota',
         monto=str(int(monto)),
         fecha=fecha_pago,
-        descripcion=f"Pago distribuido en cuota(s): {', '.join(['#' + str(d['numero']) for d in distribucion])}",
+        descripcion=desc_pago,
     )
 
     # --- Verificar si todas las cuotas estan pagadas ---
@@ -497,11 +501,14 @@ def registrar_pago(request, cliente_id):
 
     # --- Crear evento en historial ---
     cuotas_afectadas = ', '.join([f"#{d['numero']}" for d in distribucion])
+    desc_historial = f"Pago de ${format_money(monto)} distribuido en cuota(s): {cuotas_afectadas}"
+    if descripcion:
+        desc_historial += f". {descripcion}"
     HistorialEvento.objects.create(
         cliente=cliente,
         tipo='pago',
         titulo='Pago Registrado',
-        descripcion=f"Pago de ${format_money(monto)} distribuido en cuota(s): {cuotas_afectadas}",
+        descripcion=desc_historial,
         monto=str(int(monto)),
     )
 
@@ -694,6 +701,7 @@ def registrar_pago_saldo_total(request, cliente_id):
     porcentaje = float(request.data.get('porcentaje_interes', '0'))
     tiempo = int(request.data.get('tiempo', '0'))
     fecha_pago = request.data.get('fecha_pago', datetime.now().strftime('%Y-%m-%d'))
+    descripcion = request.data.get('descripcion', '')
 
     if tiempo <= 0:
         return Response({'error': 'Tiempo debe ser mayor a 0'}, status=status.HTTP_400_BAD_REQUEST)
@@ -739,23 +747,29 @@ def registrar_pago_saldo_total(request, cliente_id):
         cliente.save()
 
     # --- Crear registro de pago ---
+    desc_pago = f"Pago saldo total. Bruto: ${format_money(total_bruto)}, Abono previo: ${format_money(abono_total)}"
+    if descripcion:
+        desc_pago += f". {descripcion}"
     Pago.objects.create(
         cliente=cliente,
         tipo_pago='saldo_total',
         monto=str(int(total_a_pagar)),
         fecha=fecha_pago,
-        descripcion=f"Pago saldo total. Bruto: ${format_money(total_bruto)}, Abono previo: ${format_money(abono_total)}",
+        descripcion=desc_pago,
     )
 
     # --- Evento historial ---
+    desc_historial = (
+        f"Saldo total pagado: ${format_money(total_bruto)}. "
+        f"Interés: {porcentaje}%, Tiempo: {tiempo} meses. Fecha: {fecha_pago}"
+    )
+    if descripcion:
+        desc_historial += f". {descripcion}"
     HistorialEvento.objects.create(
         cliente=cliente,
         tipo='pago',
         titulo='Pago de Saldo Total Registrado',
-        descripcion=(
-            f"Saldo total pagado: ${format_money(total_bruto)}. "
-            f"Interés: {porcentaje}%, Tiempo: {tiempo} meses. Fecha: {fecha_pago}"
-        ),
+        descripcion=desc_historial,
         monto=str(int(total_a_pagar)),
     )
 
@@ -1391,3 +1405,42 @@ def dashboard_stats(request):
         'pagados': pagados_stats,
         'resumen_mensual': resumen_mensual,
     })
+
+
+# =============================================================================
+# NOTAS: CRUD de notas de un prestamo
+# =============================================================================
+
+@api_view(['GET', 'POST'])
+def notas_prestamo(request, cliente_id):
+    """GET: listar notas del prestamo. POST: crear una nota."""
+    try:
+        cliente = Cliente.objects.get(id=cliente_id)
+    except Cliente.DoesNotExist:
+        return Response({'error': 'Préstamo no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        notas = cliente.notas.all()
+        serializer = NotaSerializer(notas, many=True)
+        return Response(serializer.data)
+
+    # POST
+    texto = request.data.get('texto', '').strip()
+    if not texto:
+        return Response({'error': 'El texto de la nota es obligatorio'}, status=status.HTTP_400_BAD_REQUEST)
+
+    nota = Nota.objects.create(cliente=cliente, texto=texto)
+    serializer = NotaSerializer(nota)
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['DELETE'])
+def eliminar_nota(request, nota_id):
+    """Eliminar una nota por su ID."""
+    try:
+        nota = Nota.objects.get(id=nota_id)
+    except Nota.DoesNotExist:
+        return Response({'error': 'Nota no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+
+    nota.delete()
+    return Response({'mensaje': 'Nota eliminada correctamente'}, status=status.HTTP_200_OK)

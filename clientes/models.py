@@ -189,3 +189,22 @@ class Ampliacion(models.Model):
 
     def __str__(self):
         return f"Ampliacion {self.fecha} - +${self.monto_adicional}"
+
+
+# =============================================================================
+# MODELO: NOTA
+# =============================================================================
+# Notas o anotaciones sobre anomalias u observaciones de un prestamo.
+# Se pueden crear y eliminar libremente.
+# =============================================================================
+
+class Nota(models.Model):
+    cliente    = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name='notas')
+    texto      = models.TextField(help_text="Contenido de la nota")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Nota {self.id} - {self.texto[:50]}"

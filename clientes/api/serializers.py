@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from clientes.models import Cliente, Cuota, Pago, PagoInteres, HistorialEvento, Ampliacion
+from clientes.models import Cliente, Cuota, Pago, PagoInteres, HistorialEvento, Ampliacion, Nota
 
 
 # =============================================================================
@@ -47,6 +47,12 @@ class AmpliacionSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class NotaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Nota
+        fields = '__all__'
+
+
 # =============================================================================
 # SERIALIZER DE DETALLE COMPLETO
 # =============================================================================
@@ -60,6 +66,7 @@ class ClienteDetalleCompletoSerializer(serializers.ModelSerializer):
     pagos_intereses  = PagoInteresSerializer(many=True, read_only=True)
     historial        = HistorialEventoSerializer(many=True, read_only=True)
     ampliaciones     = AmpliacionSerializer(many=True, read_only=True)
+    notas            = NotaSerializer(many=True, read_only=True)
 
     class Meta:
         model = Cliente

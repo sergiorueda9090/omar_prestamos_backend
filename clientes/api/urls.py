@@ -62,4 +62,8 @@ urlpatterns = [
 
     # Dashboard estadísticas
     path('api/v2/dashboard/',                                views.dashboard_stats,                name="dashboard_stats"),
+
+    # Notas del prestamo
+    path('api/v2/<int:cliente_id>/notas/',                   views.notas_prestamo,                 name="notas_prestamo"),
+    path('api/v2/notas/<int:nota_id>/eliminar/',             views.eliminar_nota,                  name="eliminar_nota"),
 ]
