@@ -1,3 +1,4 @@
+import math
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
@@ -730,7 +731,7 @@ def registrar_pago_saldo_total(request, cliente_id):
         cuotas = cliente.cuotas.all()
         num_cuotas = cuotas.count()
         if num_cuotas > 0:
-            nuevo_valor_cuota = total_bruto / num_cuotas
+            nuevo_valor_cuota = math.ceil(total_bruto / num_cuotas / 1000) * 1000
             for cuota in cuotas:
                 cuota.valor = str(int(nuevo_valor_cuota))
                 cuota.abonado = str(int(nuevo_valor_cuota))
@@ -742,7 +743,7 @@ def registrar_pago_saldo_total(request, cliente_id):
         cliente.saldo_total_pagar = str(int(total_bruto))
         cliente.total_interes_pagar = str(int(total_bruto - dinero_prestado))
         if num_cuotas > 0:
-            cliente.valor_cuota = str(int(total_bruto / num_cuotas))
+            cliente.valor_cuota = str(int(math.ceil(total_bruto / num_cuotas / 1000) * 1000))
         cliente.estado = 'pagado'
         cliente.save()
 

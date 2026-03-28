@@ -4,6 +4,7 @@ Portar de loanCalculations.js a Python.
 Misma logica, mismos resultados.
 """
 
+import math
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -38,7 +39,7 @@ def calcular_interes_simple(capital, tasa_mensual, num_cuotas, duracion_meses=No
     total_interes = interes_mensual * meses_para_interes
 
     # Valor de cada cuota = (capital + intereses) / numero de cuotas
-    valor_cuota = (capital + total_interes) / num_cuotas if num_cuotas > 0 else 0
+    valor_cuota = math.ceil((capital + total_interes) / num_cuotas / 1000) * 1000 if num_cuotas > 0 else 0
 
     # Saldo total = capital + intereses
     saldo_total = capital + total_interes
