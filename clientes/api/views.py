@@ -886,6 +886,11 @@ def ampliar_prestamo(request, cliente_id):
     nueva_tasa = float(request.data.get('nueva_tasa', '0'))
     nuevas_cuotas_num = int(request.data.get('nuevas_cuotas', '0'))
 
+    # Parametros opcionales: tasa y plazo personalizados para la liquidacion.
+    # Si no vienen, se usa el comportamiento por defecto (tasa original + cuotas restantes).
+    tasa_liquidacion_raw = request.data.get('tasa_liquidacion', None)
+    plazo_liquidacion_raw = request.data.get('plazo_liquidacion', None)
+
     if monto_adicional <= 0 or nueva_tasa <= 0 or nuevas_cuotas_num <= 0:
         return Response(
             {'error': 'Monto adicional, tasa y número de cuotas deben ser mayores a 0'},
@@ -906,13 +911,39 @@ def ampliar_prestamo(request, cliente_id):
         total_pagado = sum(parse_money(c.abonado) for c in cliente.cuotas.filter(estado_pago__in=['pagado', 'parcial']))
         cuotas_restantes = cliente.cuotas.exclude(estado_pago='pagado').count()
 
-    # Interes de liquidacion = capital * tasa * cuotas_restantes
-    tasa_original = float(cliente.porcentaje_interes)
-    liquidacion = calcular_interes_simple(capital_anterior, tasa_original, cuotas_restantes)
+    # Interes de liquidacion: usar parametros del usuario si vienen, sino fallback al comportamiento original.
+    if tasa_liquidacion_raw is not None and plazo_liquidacion_raw is not None:
+        try:
+            tasa_liquidacion = float(tasa_liquidacion_raw)
+            plazo_liquidacion = int(plazo_liquidacion_raw)
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'tasa_liquidacion y plazo_liquidacion deben ser numericos'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if tasa_liquidacion <= 0 or plazo_liquidacion <= 0:
+            return Response(
+                {'error': 'tasa_liquidacion y plazo_liquidacion deben ser mayores a 0'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        liquidacion = calcular_interes_simple(capital_anterior, tasa_liquidacion, plazo_liquidacion)
+    else:
+        # Fallback: tasa original + cuotas restantes (comportamiento previo)
+        tasa_original = float(cliente.porcentaje_interes)
+        liquidacion = calcular_interes_simple(capital_anterior, tasa_original, cuotas_restantes)
+
     interes_liquidacion = liquidacion['total_interes']
 
     # Saldo a favor = lo que el cliente ya pago - interes de liquidacion
     saldo_favor = total_pagado - interes_liquidacion
+
+    # Capturar la fecha de la primera cuota pendiente ANTES de borrarlas.
+    # Se usara como ancla del nuevo cronograma (la primera cuota nueva tendra esa fecha).
+    primera_pendiente = None
+    if not cliente.prestamo_sin_cronograma:
+        primera_pendiente_obj = cliente.cuotas.exclude(estado_pago='pagado').order_by('fecha_pago').first()
+        if primera_pendiente_obj:
+            primera_pendiente = primera_pendiente_obj.fecha_pago
 
     # --- Paso 2: Eliminar cuotas viejas ---
     cliente.cuotas.all().delete()
@@ -922,8 +953,30 @@ def ampliar_prestamo(request, cliente_id):
     calculo = calcular_interes_simple(nuevo_capital, nueva_tasa, nuevas_cuotas_num, nuevas_cuotas_num)
 
     # --- Paso 4: Generar nuevo cronograma ---
+    # Anclar la fecha de inicio: la primera cuota nueva debe coincidir con la primera cuota
+    # pendiente del prestamo viejo. Como calcular_fechas_cobro suma un intervalo antes de
+    # devolver la primera fecha, restamos un intervalo a la fecha objetivo.
+    from dateutil.relativedelta import relativedelta
+    from datetime import timedelta as _timedelta
+
+    if primera_pendiente is not None:
+        fecha_objetivo = primera_pendiente
+        if cliente.tipo_prestamo == 'Mensual':
+            fecha_inicial_calc = fecha_objetivo - relativedelta(months=1)
+        elif cliente.tipo_prestamo == 'Quincenal':
+            fecha_inicial_calc = fecha_objetivo - _timedelta(days=15)
+        elif cliente.tipo_prestamo == 'Semanal':
+            fecha_inicial_calc = fecha_objetivo - _timedelta(days=7)
+        elif cliente.tipo_prestamo == 'Diario':
+            fecha_inicial_calc = fecha_objetivo - _timedelta(days=1)
+        else:
+            fecha_inicial_calc = fecha_objetivo - relativedelta(months=1)
+    else:
+        # Sin cuotas pendientes (sin cronograma o todas pagadas) -> arrancar desde hoy
+        fecha_inicial_calc = datetime.now().date()
+
     fechas = calcular_fechas_cobro(
-        datetime.now().strftime('%Y-%m-%d'),
+        fecha_inicial_calc.strftime('%Y-%m-%d'),
         nuevas_cuotas_num,
         cliente.tipo_prestamo,
         str(cliente.dia_cobro),
@@ -964,7 +1017,10 @@ def ampliar_prestamo(request, cliente_id):
     cliente.numero_cuotas = nuevas_cuotas_num
     cliente.duracion_prestamo = nuevas_cuotas_num
     cliente.valor_cuota = str(int(calculo['valor_cuota']))
-    cliente.saldo_total_pagar = str(int(calculo['saldo_total']))
+    # Descontar el saldo a favor aplicado del saldo total del cliente para que
+    # otros consumidores (HistorialSeguimiento, reportes) vean el saldo real.
+    saldo_favor_aplicado = max(0, saldo_favor)
+    cliente.saldo_total_pagar = str(int(calculo['saldo_total'] - saldo_favor_aplicado))
     cliente.total_interes_pagar = str(int(calculo['total_interes']))
     cliente.interes_mensual = str(int(nuevo_capital * nueva_tasa / 100))
     cliente.estado = 'vigente'
@@ -1015,7 +1071,8 @@ def ampliar_prestamo(request, cliente_id):
         descripcion=(
             f"Monto adicional: ${format_money(monto_adicional)}, "
             f"Nuevo total: ${format_money(nuevo_capital)}, "
-            f"{nuevas_cuotas_num} cuotas"
+            f"{nuevas_cuotas_num} cuotas. "
+            f"Saldo a favor aplicado: ${format_money(saldo_favor_aplicado)}."
         ),
         monto=str(int(monto_adicional)),
     )
