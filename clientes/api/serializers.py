@@ -24,9 +24,14 @@ class ClienteSerializer(serializers.ModelSerializer):
 # =============================================================================
 
 class PagoSerializer(serializers.ModelSerializer):
+    tiene_snapshot = serializers.SerializerMethodField()
+
     class Meta:
         model = Pago
         fields = '__all__'
+
+    def get_tiene_snapshot(self, obj):
+        return hasattr(obj, 'snapshot_saldo_total')
 
 
 class PagoInteresSerializer(serializers.ModelSerializer):

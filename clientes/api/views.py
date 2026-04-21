@@ -2,7 +2,7 @@ import math
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from clientes.models import Cliente, Cuota, Pago, PagoInteres, HistorialEvento, Ampliacion, Nota
+from clientes.models import Cliente, Cuota, Pago, PagoInteres, HistorialEvento, Ampliacion, Nota, PagoSaldoTotalSnapshot
 from .serializers import (
     ClienteSerializer, CuotaSerializer,
     PagoSerializer, PagoInteresSerializer, HistorialEventoSerializer,
@@ -712,6 +712,28 @@ def registrar_pago_saldo_total(request, cliente_id):
     # --- Calcular total bruto ---
     total_bruto = dinero_prestado + (dinero_prestado * (porcentaje / 100) * tiempo)
 
+    # --- Capturar snapshot ANTES de cualquier modificacion destructiva ---
+    # Se guarda el estado completo del cliente y de todas sus cuotas para
+    # poder revertir el pago mas adelante.
+    snapshot_cliente_data = {
+        'estado': cliente.estado,
+        'valor_cuota': cliente.valor_cuota,
+        'saldo_total_pagar': cliente.saldo_total_pagar,
+        'total_interes_pagar': cliente.total_interes_pagar,
+        'total_pagado_cuotas_sin_cronograma': cliente.total_pagado_cuotas_sin_cronograma,
+        'prestamo_sin_cronograma': cliente.prestamo_sin_cronograma,
+    }
+    snapshot_cuotas_data = [
+        {
+            'id': c.id,
+            'valor': c.valor,
+            'abonado': c.abonado,
+            'saldo': c.saldo,
+            'estado_pago': c.estado_pago,
+        }
+        for c in cliente.cuotas.all().order_by('numero')
+    ]
+
     # --- Si es prestamo sin cronograma ---
     if cliente.prestamo_sin_cronograma:
         abono_total = parse_money(cliente.total_pagado_cuotas_sin_cronograma)
@@ -751,12 +773,19 @@ def registrar_pago_saldo_total(request, cliente_id):
     desc_pago = f"Pago saldo total. Bruto: ${format_money(total_bruto)}, Abono previo: ${format_money(abono_total)}"
     if descripcion:
         desc_pago += f". {descripcion}"
-    Pago.objects.create(
+    pago_creado = Pago.objects.create(
         cliente=cliente,
         tipo_pago='saldo_total',
         monto=str(int(total_a_pagar)),
         fecha=fecha_pago,
         descripcion=desc_pago,
+    )
+
+    # --- Persistir snapshot atado al Pago ---
+    PagoSaldoTotalSnapshot.objects.create(
+        pago=pago_creado,
+        cliente_data=snapshot_cliente_data,
+        cuotas_data=snapshot_cuotas_data,
     )
 
     # --- Evento historial ---
@@ -772,6 +801,97 @@ def registrar_pago_saldo_total(request, cliente_id):
         titulo='Pago de Saldo Total Registrado',
         descripcion=desc_historial,
         monto=str(int(total_a_pagar)),
+    )
+
+    response_serializer = ClienteDetalleCompletoSerializer(cliente)
+    return Response(response_serializer.data)
+
+
+# =============================================================================
+# 8.b REVERTIR PAGO DE SALDO TOTAL
+# POST /clientes/api/v2/pagos/<pago_id>/revertir-saldo-total/
+#
+# Restaura el estado del cliente y de todas sus cuotas tal y como estaban
+# justo antes del pago de saldo total. Requiere que el pago tenga un
+# PagoSaldoTotalSnapshot asociado. Borra el Pago (y su snapshot en cascada)
+# y registra un HistorialEvento de eliminacion.
+# =============================================================================
+
+@api_view(['POST'])
+@transaction.atomic
+def revertir_pago_saldo_total(request, pago_id):
+    try:
+        pago = Pago.objects.select_related('cliente').get(pk=pago_id)
+    except Pago.DoesNotExist:
+        return Response({'error': 'Pago no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+    if pago.tipo_pago != 'saldo_total':
+        return Response(
+            {'error': 'Este endpoint solo revierte pagos tipo saldo_total'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        snapshot = pago.snapshot_saldo_total
+    except PagoSaldoTotalSnapshot.DoesNotExist:
+        return Response(
+            {'error': 'Este pago no tiene snapshot; fue registrado antes de habilitar la reversion y no puede deshacerse automaticamente.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    cliente = pago.cliente
+    cuotas_actuales_ids = set(cliente.cuotas.values_list('id', flat=True))
+    cuotas_snapshot_ids = {c['id'] for c in snapshot.cuotas_data}
+
+    # Rechazar si la estructura de cuotas cambio desde el snapshot (p.ej. una
+    # ampliacion posterior borro cuotas). Evita estados inconsistentes.
+    if cuotas_actuales_ids != cuotas_snapshot_ids:
+        return Response(
+            {'error': 'Las cuotas del prestamo han cambiado desde el pago (posible ampliacion posterior). La reversion automatica no es segura.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # --- Restaurar cliente ---
+    cliente_data = snapshot.cliente_data
+    cliente.estado = cliente_data.get('estado', cliente.estado)
+    cliente.valor_cuota = cliente_data.get('valor_cuota', cliente.valor_cuota)
+    cliente.saldo_total_pagar = cliente_data.get('saldo_total_pagar', cliente.saldo_total_pagar)
+    cliente.total_interes_pagar = cliente_data.get('total_interes_pagar', cliente.total_interes_pagar)
+    cliente.total_pagado_cuotas_sin_cronograma = cliente_data.get(
+        'total_pagado_cuotas_sin_cronograma',
+        cliente.total_pagado_cuotas_sin_cronograma,
+    )
+    cliente.prestamo_sin_cronograma = cliente_data.get(
+        'prestamo_sin_cronograma',
+        cliente.prestamo_sin_cronograma,
+    )
+    cliente.save()
+
+    # --- Restaurar cuotas ---
+    for c_data in snapshot.cuotas_data:
+        Cuota.objects.filter(pk=c_data['id']).update(
+            valor=c_data['valor'],
+            abonado=c_data['abonado'],
+            saldo=c_data['saldo'],
+            estado_pago=c_data['estado_pago'],
+        )
+
+    monto_revertido = pago.monto
+    fecha_pago_original = str(pago.fecha)
+
+    # Borrar pago (cascade borra el snapshot)
+    pago.delete()
+
+    # --- Evento historial ---
+    HistorialEvento.objects.create(
+        cliente=cliente,
+        tipo='eliminacion_pago',
+        titulo='Pago de Saldo Total Revertido',
+        descripcion=(
+            f"Se revirtio el pago de saldo total de ${format_money(parse_money(monto_revertido))} "
+            f"del {fecha_pago_original}. Estado del prestamo y cuotas restaurados."
+        ),
+        monto=str(int(parse_money(monto_revertido))),
     )
 
     response_serializer = ClienteDetalleCompletoSerializer(cliente)
@@ -827,6 +947,19 @@ def eliminar_pago_cuota(request, cuota_id):
         cuota = Cuota.objects.get(pk=cuota_id)
     except Cuota.DoesNotExist:
         return Response({'error': 'Cuota no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Si existe un pago de saldo total con snapshot, los abonos de cuotas son
+    # producto de ese pago masivo. Eliminarlos individualmente corrompe el
+    # estado; el usuario debe revertir el saldo total primero.
+    tiene_saldo_total_activo = cuota.cliente.pagos.filter(
+        tipo_pago='saldo_total',
+        snapshot_saldo_total__isnull=False,
+    ).exists()
+    if tiene_saldo_total_activo:
+        return Response(
+            {'error': 'Este prestamo tiene un pago de saldo total activo. Revierta el pago de saldo total antes de modificar cuotas individuales.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     monto_eliminado = parse_money(cuota.abonado)
     if monto_eliminado == 0:
@@ -911,6 +1044,16 @@ def ampliar_prestamo(request, cliente_id):
         total_pagado = sum(parse_money(c.abonado) for c in cliente.cuotas.filter(estado_pago__in=['pagado', 'parcial']))
         cuotas_restantes = cliente.cuotas.exclude(estado_pago='pagado').count()
 
+    # Los pagos de interes manuales (tipo='interes') son dinero que el cliente
+    # ya desembolso hacia intereses. Se suman tanto al total pagado como al
+    # interes de liquidacion mostrado, para que el saldo a favor refleje lo que
+    # el usuario ve en el modal. Los de tipo='liquidacion' se excluyen: son
+    # registros automaticos de ampliaciones previas.
+    total_pagado_intereses = sum(
+        parse_money(p.monto) for p in cliente.pagos_intereses.filter(tipo='interes')
+    )
+    total_pagado += total_pagado_intereses
+
     # Interes de liquidacion: usar parametros del usuario si vienen, sino fallback al comportamiento original.
     if tasa_liquidacion_raw is not None and plazo_liquidacion_raw is not None:
         try:
@@ -932,10 +1075,22 @@ def ampliar_prestamo(request, cliente_id):
         tasa_original = float(cliente.porcentaje_interes)
         liquidacion = calcular_interes_simple(capital_anterior, tasa_original, cuotas_restantes)
 
-    interes_liquidacion = liquidacion['total_interes']
+    # Interes nuevo calculado por la liquidacion. Este es el valor que se usa
+    # para registros (PagoInteres tipo='liquidacion', Ampliacion.interes_liquidacion,
+    # interes_acumulado, historial) porque representa el cargo real del evento.
+    interes_liquidacion_nuevo = liquidacion['total_interes']
 
-    # Saldo a favor = lo que el cliente ya pago - interes de liquidacion
-    saldo_favor = total_pagado - interes_liquidacion
+    # Para el saldo a favor, al total pagado ya se le sumaron los intereses manuales
+    # previos; sumamos los mismos al interes de liquidacion para que aritmeticamente
+    # se cancelen y el saldo refleje solo (abonos_cuotas - interes_nuevo).
+    interes_liquidacion_display = interes_liquidacion_nuevo + total_pagado_intereses
+
+    # `interes_liquidacion` conserva el nombre anterior para minimizar cambios
+    # aguas abajo; apunta al valor real del cargo (no al display).
+    interes_liquidacion = interes_liquidacion_nuevo
+
+    # Saldo a favor = lo que el cliente ya pago - interes de liquidacion (display)
+    saldo_favor = total_pagado - interes_liquidacion_display
 
     # Capturar la fecha de la primera cuota pendiente ANTES de borrarlas.
     # Se usara como ancla del nuevo cronograma (la primera cuota nueva tendra esa fecha).

@@ -208,3 +208,25 @@ class Nota(models.Model):
 
     def __str__(self):
         return f"Nota {self.id} - {self.texto[:50]}"
+
+
+# =============================================================================
+# MODELO: PAGO SALDO TOTAL SNAPSHOT
+# =============================================================================
+# Snapshot del estado del prestamo justo antes de aplicar un pago tipo
+# 'saldo_total'. Permite revertir el pago y restaurar cuotas y cliente.
+# OneToOne con Pago => si el Pago se elimina, el snapshot cae en cascada.
+# =============================================================================
+
+class PagoSaldoTotalSnapshot(models.Model):
+    pago         = models.OneToOneField(
+        Pago,
+        on_delete=models.CASCADE,
+        related_name='snapshot_saldo_total',
+    )
+    cliente_data = models.JSONField(help_text="Estado del cliente antes del pago")
+    cuotas_data  = models.JSONField(help_text="Estado de las cuotas antes del pago")
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Snapshot pago #{self.pago_id}"

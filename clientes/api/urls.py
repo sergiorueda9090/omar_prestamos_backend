@@ -42,6 +42,9 @@ urlpatterns = [
     # Pagar saldo total
     path('api/v2/<int:cliente_id>/pagar-saldo-total/',       views.registrar_pago_saldo_total,     name="registrar_pago_saldo_total"),
 
+    # Revertir pago de saldo total
+    path('api/v2/pagos/<int:pago_id>/revertir-saldo-total/', views.revertir_pago_saldo_total,     name="revertir_pago_saldo_total"),
+
     # Cambiar fecha de cuota
     path('api/v2/cuotas/<int:cuota_id>/cambiar-fecha/',      views.cambiar_fecha_cuota,            name="cambiar_fecha_cuota"),
 
