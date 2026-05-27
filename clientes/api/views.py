@@ -476,8 +476,10 @@ def registrar_pago(request, cliente_id):
         return Response({'error': 'El monto debe ser mayor a 0'}, status=status.HTTP_400_BAD_REQUEST)
 
     # --- Distribuir pago entre cuotas pendientes ---
+    # La descripcion del usuario se guarda en cada cuota afectada para que
+    # tambien sea visible en el cronograma de cuotas.
     cuotas = cliente.cuotas.all()
-    distribucion = distribuir_pago_en_cuotas(cuotas, monto)
+    distribucion = distribuir_pago_en_cuotas(cuotas, monto, descripcion)
 
     if not distribucion:
         return Response({'error': 'No hay cuotas pendientes'}, status=status.HTTP_400_BAD_REQUEST)
@@ -969,6 +971,7 @@ def eliminar_pago_cuota(request, cuota_id):
     cuota.abonado = '0'
     cuota.saldo = cuota.valor
     cuota.estado_pago = 'pendiente'
+    cuota.descripcion = ''
     cuota.save()
 
     # --- Si el prestamo estaba pagado, volver a vigente ---
@@ -1322,6 +1325,90 @@ def marcar_perdido(request, cliente_id):
         titulo='Marcado como Perdido',
         descripcion=f"Estado anterior: {estado_anterior}. El cliente fue marcado como perdido.",
     )
+
+    response_serializer = ClienteDetalleCompletoSerializer(cliente)
+    return Response(response_serializer.data)
+
+
+# =============================================================================
+# 14b. EDITAR INFO BASICA DEL CLIENTE
+# PUT /clientes/api/v2/<id>/editar-info/
+#
+# Permite cambiar SOLO el estado del prestamo y/o la fecha del prestamo.
+# El resto de campos es de solo lectura y no se modifica aqui.
+# Body (ambos opcionales): { "estado": "vigente|pagado|perdido", "fecha_prestamo": "YYYY-MM-DD" }
+# Nota: cambiar la fecha del prestamo NO recalcula las cuotas (cambio simple).
+# =============================================================================
+
+@api_view(['PUT'])
+@transaction.atomic
+def editar_info_cliente(request, cliente_id):
+    try:
+        cliente = Cliente.objects.get(pk=cliente_id)
+    except Cliente.DoesNotExist:
+        return Response({'error': 'Cliente no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+    nuevo_estado = request.data.get('estado')
+    nueva_fecha = request.data.get('fecha_prestamo')
+
+    if not nuevo_estado and not nueva_fecha:
+        return Response(
+            {'error': 'Debe enviar al menos estado o fecha_prestamo'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    cambios = []
+
+    # --- Cambio de estado ---
+    if nuevo_estado:
+        estados_validos = ['vigente', 'pagado', 'perdido']
+        if nuevo_estado not in estados_validos:
+            return Response(
+                {'error': f"Estado inválido. Debe ser uno de: {', '.join(estados_validos)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if nuevo_estado != cliente.estado:
+            estado_anterior = cliente.estado
+            cliente.estado = nuevo_estado
+            cambios.append((
+                'cambio_estado',
+                'Estado Modificado',
+                f"Estado anterior: {estado_anterior}, Nuevo estado: {nuevo_estado}",
+            ))
+
+    # --- Cambio de fecha del prestamo ---
+    if nueva_fecha:
+        try:
+            datetime.strptime(nueva_fecha, '%Y-%m-%d')
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'fecha_prestamo debe tener formato YYYY-MM-DD'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if str(cliente.fecha_prestamo) != nueva_fecha:
+            fecha_anterior = str(cliente.fecha_prestamo)
+            cliente.fecha_prestamo = nueva_fecha
+            cambios.append((
+                'cambio_fecha',
+                'Fecha del Préstamo Modificada',
+                f"Fecha anterior: {fecha_anterior}, Nueva fecha: {nueva_fecha}",
+            ))
+
+    if not cambios:
+        return Response(
+            {'error': 'No hay cambios para aplicar'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    cliente.save()
+
+    for tipo, titulo, descripcion in cambios:
+        HistorialEvento.objects.create(
+            cliente=cliente,
+            tipo=tipo,
+            titulo=titulo,
+            descripcion=descripcion,
+        )
 
     response_serializer = ClienteDetalleCompletoSerializer(cliente)
     return Response(response_serializer.data)

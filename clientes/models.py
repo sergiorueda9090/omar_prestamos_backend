@@ -67,6 +67,7 @@ class Cuota(models.Model):
     valor       = models.CharField(max_length=100)
     abonado     = models.CharField(max_length=100, default='0', help_text="Monto pagado en esta cuota")
     saldo       = models.CharField(max_length=100, default='0', help_text="Monto pendiente de esta cuota")
+    descripcion = models.TextField(blank=True, default='', help_text="Descripción/nota de los pagos aplicados a esta cuota")
     estado_pago = models.CharField(
         max_length=20,
         choices=[

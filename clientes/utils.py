@@ -201,9 +201,19 @@ def aplicar_saldo_favor(cuotas_lista, saldo_favor):
 # Retorna:
 #   list[dict] - Lista con info de cada cuota afectada:
 #     { cuota_id, numero, abonar, saldo_antes, saldo_despues, estado }
+#
+# Si se pasa 'descripcion', se guarda en cada cuota afectada (se acumula con
+# la descripcion previa de la cuota, separada por " | ").
 # =============================================================================
 
-def distribuir_pago_en_cuotas(cuotas_queryset, monto):
+def _agregar_descripcion_cuota(cuota, descripcion):
+    """Acumula la descripcion del pago en la cuota sin perder notas previas."""
+    if not descripcion:
+        return
+    cuota.descripcion = f"{cuota.descripcion} | {descripcion}" if cuota.descripcion else descripcion
+
+
+def distribuir_pago_en_cuotas(cuotas_queryset, monto, descripcion=''):
     monto_restante = float(monto)
     distribucion = []
 
@@ -234,6 +244,7 @@ def distribuir_pago_en_cuotas(cuotas_queryset, monto):
             cuota.abonado = str(int(float(cuota.valor)))
             cuota.saldo = '0'
             cuota.estado_pago = 'pagado'
+            _agregar_descripcion_cuota(cuota, descripcion)
             cuota.save()
         else:
             # El pago cubre parcialmente
@@ -253,6 +264,7 @@ def distribuir_pago_en_cuotas(cuotas_queryset, monto):
             cuota.abonado = str(int(nuevo_abonado))
             cuota.saldo = str(int(nuevo_saldo))
             cuota.estado_pago = 'parcial'
+            _agregar_descripcion_cuota(cuota, descripcion)
             cuota.save()
 
             monto_restante = 0

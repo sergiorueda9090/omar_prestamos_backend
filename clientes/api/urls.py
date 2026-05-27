@@ -60,6 +60,9 @@ urlpatterns = [
     # Marcar como perdido
     path('api/v2/<int:cliente_id>/marcar-perdido/',          views.marcar_perdido,                 name="marcar_perdido"),
 
+    # Editar info basica (solo estado y/o fecha del prestamo)
+    path('api/v2/<int:cliente_id>/editar-info/',             views.editar_info_cliente,            name="editar_info_cliente"),
+
     # Exportar Excel completo (v2)
     path('api/v2/exportar/',                                 views.exportar_clientes_excel_v2,     name="exportar_clientes_excel_v2"),
 
