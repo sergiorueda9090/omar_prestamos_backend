@@ -5,8 +5,34 @@ Misma logica, mismos resultados.
 """
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
+
+
+# =============================================================================
+# CALCULAR DIAS DE MORA
+# =============================================================================
+# dias_mora = fecha_pago_real - fecha_proximo_pago (vencimiento esperado).
+# Si el pago fue puntual o anticipado, o falta alguna fecha, retorna 0.
+# Acepta strings 'YYYY-MM-DD' o date/datetime.
+# =============================================================================
+
+def _to_date(valor):
+    if valor is None or valor == '':
+        return None
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+    return datetime.strptime(str(valor)[:10], '%Y-%m-%d').date()
+
+
+def calcular_dias_mora(fecha_proximo_pago, fecha_pago_real):
+    vencimiento = _to_date(fecha_proximo_pago)
+    real = _to_date(fecha_pago_real)
+    if vencimiento is None or real is None:
+        return 0
+    return max(0, (real - vencimiento).days)
 
 
 # =============================================================================

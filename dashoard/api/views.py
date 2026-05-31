@@ -149,7 +149,7 @@ def exportar_clientes_excel(request):
         except ValueError:
             return Response({'error': 'endDate inválida. Usa formato YYYY-MM-DD.'}, status=400)
 
-    clientes = clientes.prefetch_related('cuotas')
+    clientes = clientes.prefetch_related('cuotas', 'pagos')
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -172,18 +172,43 @@ def exportar_clientes_excel(request):
         "Saldo total a pagar",
         "Fecha de pago de cuota",
         "Valor de cuota",
-        "Estado de pago"
+        "Estado de pago",
+        "Días de mora"
     ]
     ws.append(headers)
 
     for cell in ws[1]:
         cell.font = Font(bold=True)
 
+    hoy = datetime.now().date()
+    # Resaltado rojo para celdas con mora (> 0 dias).
+    mora_fill = PatternFill(start_color="F44336", end_color="F44336", fill_type="solid")
+    mora_font = Font(bold=True, color="FFFFFF")
+    col_mora = len(headers)  # ultima columna = "Días de mora"
+
     for cliente in clientes:
         cuotas = cliente.cuotas.all().order_by('fecha_pago')
 
+        # Mora historica registrada por vencimiento: cada pago de cuota guarda el
+        # vencimiento de la cuota en la que se debia y sus dias de mora.
+        mora_por_vencimiento = {}
+        for pago in cliente.pagos.all():
+            if pago.tipo_pago == 'cuota' and pago.fecha_proximo_pago:
+                k = pago.fecha_proximo_pago
+                mora_por_vencimiento[k] = max(mora_por_vencimiento.get(k, 0), pago.dias_mora or 0)
+
+        def dias_mora_cuota(cuota):
+            # Si hay un pago registrado para su vencimiento, usa la mora historica.
+            if cuota.fecha_pago in mora_por_vencimiento:
+                return mora_por_vencimiento[cuota.fecha_pago]
+            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy.
+            if cuota.estado_pago != 'pagado':
+                return max(0, (hoy - cuota.fecha_pago).days)
+            return 0
+
         if cuotas.exists():
             for cuota in cuotas:
+                mora = dias_mora_cuota(cuota)
                 ws.append([
                     cliente.id,
                     cliente.nombre,
@@ -201,8 +226,13 @@ def exportar_clientes_excel(request):
                     cliente.saldo_total_pagar,
                     cuota.fecha_pago.strftime("%Y-%m-%d"),
                     cuota.valor,
-                    cuota.estado_pago
+                    cuota.estado_pago,
+                    mora
                 ])
+                if mora > 0:
+                    celda = ws.cell(row=ws.max_row, column=col_mora)
+                    celda.fill = mora_fill
+                    celda.font = mora_font
         else:
             ws.append([
                 cliente.id,
@@ -219,7 +249,7 @@ def exportar_clientes_excel(request):
                 cliente.numero_cuotas,
                 cliente.total_interes_pagar,
                 cliente.saldo_total_pagar,
-                "", "", ""
+                "", "", "", ""
             ])
 
     # Ajustar ancho de columnas
@@ -1133,7 +1163,7 @@ def exportar_clientes_excel_v2(request):
         except ValueError:
             pass
 
-    clientes = clientes.prefetch_related('cuotas', 'pagos_intereses')
+    clientes = clientes.prefetch_related('cuotas', 'pagos_intereses', 'pagos')
 
     wb = openpyxl.Workbook()
 
@@ -1250,22 +1280,49 @@ def exportar_clientes_excel_v2(request):
     apply_header_style(ws2, [
         "ID Cliente", "N Tarjeta", "Nombre", "Estado Prestamo",
         "Cuota #", "Fecha Pago", "Valor Cuota", "Abonado", "Saldo Cuota", "Estado Cuota",
+        "Dias Mora",
     ])
+
+    hoy = datetime.now().date()
 
     for c in clientes:
         cuotas = c.cuotas.all().order_by('numero')
+
+        # Mora historica registrada por vencimiento: cada pago de cuota guarda el
+        # vencimiento de la cuota en la que se debia y sus dias de mora.
+        mora_por_vencimiento = {}
+        for pago in c.pagos.all():
+            if pago.tipo_pago == 'cuota' and pago.fecha_proximo_pago:
+                k = pago.fecha_proximo_pago
+                mora_por_vencimiento[k] = max(mora_por_vencimiento.get(k, 0), pago.dias_mora or 0)
+
+        def dias_mora_cuota(cuota):
+            # Si hay un pago registrado para su vencimiento, usa la mora historica.
+            if cuota.fecha_pago in mora_por_vencimiento:
+                return mora_por_vencimiento[cuota.fecha_pago]
+            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy.
+            if cuota.estado_pago != 'pagado':
+                return max(0, (hoy - cuota.fecha_pago).days)
+            return 0
+
         for cuota in cuotas:
             row = ws2.max_row + 1
+            mora = dias_mora_cuota(cuota)
             ws2.append([
                 c.id, c.numero_tarjeta, c.nombre, c.estado.upper(),
                 cuota.numero, cuota.fecha_pago.strftime("%Y-%m-%d"),
                 fmt(cuota.valor), fmt(cuota.abonado), fmt(cuota.saldo),
-                cuota.estado_pago.upper(),
+                cuota.estado_pago.upper(), mora,
             ])
             fill = cuota_estado_fills.get(cuota.estado_pago)
             if fill:
                 for cell in ws2[row]:
                     cell.fill = fill
+            # Resaltar en rojo la celda de mora si hay dias de mora (> 0).
+            if mora > 0:
+                celda = ws2.cell(row=row, column=ws2.max_column)
+                celda.fill = PatternFill(start_color="F44336", end_color="F44336", fill_type="solid")
+                celda.font = Font(bold=True, color="FFFFFF")
 
     auto_width(ws2)
 

@@ -11,8 +11,14 @@ class CuotaSerializer(serializers.ModelSerializer):
         model = Cuota
         fields = '__all__'
 
+class PagoInteresSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PagoInteres
+        fields = '__all__'
+
 class ClienteSerializer(serializers.ModelSerializer):
-    cuotas = CuotaSerializer(many=True, read_only=True)  # Relación inversa
+    cuotas          = CuotaSerializer(many=True, read_only=True)         # Relación inversa
+    pagos_intereses = PagoInteresSerializer(many=True, read_only=True)   # Intereses dados
 
     class Meta:
         model = Cliente
@@ -32,12 +38,6 @@ class PagoSerializer(serializers.ModelSerializer):
 
     def get_tiene_snapshot(self, obj):
         return hasattr(obj, 'snapshot_saldo_total')
-
-
-class PagoInteresSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PagoInteres
-        fields = '__all__'
 
 
 class HistorialEventoSerializer(serializers.ModelSerializer):
