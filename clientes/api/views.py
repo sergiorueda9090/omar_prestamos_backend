@@ -1375,9 +1375,15 @@ def marcar_perdido(request, cliente_id):
 # 14b. EDITAR INFO BASICA DEL CLIENTE
 # PUT /clientes/api/v2/<id>/editar-info/
 #
-# Permite cambiar SOLO el estado del prestamo y/o la fecha del prestamo.
-# El resto de campos es de solo lectura y no se modifica aqui.
-# Body (ambos opcionales): { "estado": "vigente|pagado|perdido", "fecha_prestamo": "YYYY-MM-DD" }
+# Permite cambiar la informacion basica del cliente: estado, fecha del prestamo,
+# numero de tarjeta y nombre. Los terminos del prestamo (monto, % interes,
+# duracion, etc.) son de solo lectura y NO se modifican aqui.
+# Body (todos opcionales): {
+#   "estado": "vigente|pagado|perdido",
+#   "fecha_prestamo": "YYYY-MM-DD",
+#   "numero_tarjeta": "...",   # debe ser unico (no puede repetirse)
+#   "nombre": "..."
+# }
 # Nota: cambiar la fecha del prestamo NO recalcula las cuotas (cambio simple).
 # =============================================================================
 
@@ -1391,14 +1397,56 @@ def editar_info_cliente(request, cliente_id):
 
     nuevo_estado = request.data.get('estado')
     nueva_fecha = request.data.get('fecha_prestamo')
+    nuevo_numero_tarjeta = request.data.get('numero_tarjeta')
+    nuevo_nombre = request.data.get('nombre')
 
-    if not nuevo_estado and not nueva_fecha:
+    if (nuevo_estado is None and nueva_fecha is None
+            and nuevo_numero_tarjeta is None and nuevo_nombre is None):
         return Response(
-            {'error': 'Debe enviar al menos estado o fecha_prestamo'},
+            {'error': 'Debe enviar al menos un campo para actualizar'},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     cambios = []
+
+    # --- Cambio de numero de tarjeta (debe ser unico) ---
+    if nuevo_numero_tarjeta is not None:
+        nuevo_numero_tarjeta = str(nuevo_numero_tarjeta).strip()
+        if not nuevo_numero_tarjeta:
+            return Response(
+                {'error': 'El número de tarjeta no puede estar vacío'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if nuevo_numero_tarjeta != cliente.numero_tarjeta:
+            if Cliente.objects.filter(numero_tarjeta=nuevo_numero_tarjeta).exclude(pk=cliente.pk).exists():
+                return Response(
+                    {'error': f"El número de tarjeta '{nuevo_numero_tarjeta}' ya está en uso por otro cliente"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            tarjeta_anterior = cliente.numero_tarjeta
+            cliente.numero_tarjeta = nuevo_numero_tarjeta
+            cambios.append((
+                'cambio_estado',
+                'Número de Tarjeta Modificado',
+                f"Tarjeta anterior: {tarjeta_anterior}, Nueva tarjeta: {nuevo_numero_tarjeta}",
+            ))
+
+    # --- Cambio de nombre ---
+    if nuevo_nombre is not None:
+        nuevo_nombre = str(nuevo_nombre).strip()
+        if not nuevo_nombre:
+            return Response(
+                {'error': 'El nombre no puede estar vacío'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if nuevo_nombre != cliente.nombre:
+            nombre_anterior = cliente.nombre
+            cliente.nombre = nuevo_nombre
+            cambios.append((
+                'cambio_estado',
+                'Nombre Modificado',
+                f"Nombre anterior: {nombre_anterior}, Nuevo nombre: {nuevo_nombre}",
+            ))
 
     # --- Cambio de estado ---
     if nuevo_estado:
