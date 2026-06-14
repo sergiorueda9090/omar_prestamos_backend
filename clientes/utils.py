@@ -12,8 +12,15 @@ from dateutil.relativedelta import relativedelta
 # =============================================================================
 # CALCULAR DIAS DE MORA
 # =============================================================================
-# dias_mora = fecha_pago_real - fecha_proximo_pago (vencimiento esperado).
-# Si el pago fue puntual o anticipado, o falta alguna fecha, retorna 0.
+# Convencion alineada con el frontend (panel "Opciones de Pago Rapido" y modales):
+#   - fecha_proximo_pago : fecha de REFERENCIA del pago (promesa del cliente u hoy).
+#   - fecha_pago_real    : VENCIMIENTO real de la cuota (cuota.fecha_pago).
+#
+# dias_mora = max(0, fecha_proximo_pago - fecha_pago_real)
+#           = max(0, referencia - vencimiento)
+#
+# Es decir, cuantos dias DESPUES del vencimiento se paga/promete pagar. Si es
+# puntual o anticipado, o falta alguna fecha, retorna 0.
 # Acepta strings 'YYYY-MM-DD' o date/datetime.
 # =============================================================================
 
@@ -28,11 +35,11 @@ def _to_date(valor):
 
 
 def calcular_dias_mora(fecha_proximo_pago, fecha_pago_real):
-    vencimiento = _to_date(fecha_proximo_pago)
-    real = _to_date(fecha_pago_real)
-    if vencimiento is None or real is None:
+    referencia = _to_date(fecha_proximo_pago)
+    vencimiento = _to_date(fecha_pago_real)
+    if referencia is None or vencimiento is None:
         return 0
-    return max(0, (real - vencimiento).days)
+    return max(0, (referencia - vencimiento).days)
 
 
 # =============================================================================

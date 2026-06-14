@@ -191,12 +191,14 @@ def exportar_clientes_excel(request):
     for cliente in clientes:
         cuotas = cliente.cuotas.all().order_by('fecha_pago')
 
-        # Mora historica registrada por vencimiento: cada pago de cuota guarda el
-        # vencimiento de la cuota en la que se debia y sus dias de mora.
+        # Mora historica registrada por vencimiento: cada pago de cuota guarda en
+        # fecha_pago_real el VENCIMIENTO de la cuota en la que se debia, junto con
+        # sus dias de mora. Se indexa por ese vencimiento para poder cruzarlo con
+        # cuota.fecha_pago al reconstruir el cronograma.
         mora_por_vencimiento = {}
         for pago in cliente.pagos.all():
-            if pago.tipo_pago == 'cuota' and pago.fecha_proximo_pago:
-                k = pago.fecha_proximo_pago
+            if pago.tipo_pago == 'cuota' and pago.fecha_pago_real:
+                k = pago.fecha_pago_real
                 mora_por_vencimiento[k] = max(mora_por_vencimiento.get(k, 0), pago.dias_mora or 0)
 
         def dias_mora_cuota(cuota):
@@ -503,9 +505,10 @@ def registrar_pago(request, cliente_id):
     fecha_pago = request.data.get('fecha_pago', datetime.now().strftime('%Y-%m-%d'))
     descripcion = request.data.get('descripcion', '')
 
-    # Fechas para el registro de mora. 'fecha_proximo_pago' es el vencimiento
-    # esperado (cuota en la que seguia debiendo); 'fecha_pago_real' es cuando
-    # entrego el dinero de verdad. La mora se calcula entre ambas.
+    # Fechas para el registro de mora (convencion alineada con el frontend):
+    #   'fecha_proximo_pago' = referencia del pago (promesa del cliente u hoy);
+    #   'fecha_pago_real'    = vencimiento real de la cuota en la que se debia.
+    # dias_mora = max(0, fecha_proximo_pago - fecha_pago_real).
     fecha_proximo_pago = request.data.get('fecha_proximo_pago') or None
     fecha_pago_real = request.data.get('fecha_pago_real') or None
     dias_mora = calcular_dias_mora(fecha_proximo_pago, fecha_pago_real)
@@ -977,6 +980,42 @@ def cambiar_fecha_cuota(request, cuota_id):
 
 
 # =============================================================================
+# 9b. CAMBIAR FECHA PROXIMO PAGO (promesa) DE UNA CUOTA
+# PUT /clientes/api/v2/cuotas/<id>/cambiar-proximo-pago/
+#
+# Body: { "fecha_proximo_pago": "2026-08-01" }  (o null para limpiar)
+# Solo cambia la fecha que el cliente promete pagar. NO toca fecha_pago
+# (el vencimiento real). La mora = fecha_proximo_pago - fecha_pago.
+# =============================================================================
+
+@api_view(['PUT'])
+@transaction.atomic
+def cambiar_fecha_proximo_pago(request, cuota_id):
+    try:
+        cuota = Cuota.objects.get(pk=cuota_id)
+    except Cuota.DoesNotExist:
+        return Response({'error': 'Cuota no encontrada'}, status=status.HTTP_404_NOT_FOUND)
+
+    # Permite limpiar la promesa enviando vacio/None.
+    nueva_fecha = request.data.get('fecha_proximo_pago') or None
+
+    fecha_anterior = str(cuota.fecha_proximo_pago) if cuota.fecha_proximo_pago else '—'
+    cuota.fecha_proximo_pago = nueva_fecha
+    cuota.save(update_fields=['fecha_proximo_pago'])
+
+    # --- Evento historial ---
+    HistorialEvento.objects.create(
+        cliente=cuota.cliente,
+        tipo='cambio_fecha',
+        titulo=f'Fecha Próximo Pago - Cuota #{cuota.numero}',
+        descripcion=f"Próximo pago anterior: {fecha_anterior}, Nuevo: {nueva_fecha or '—'} (vencimiento real sin cambios: {cuota.fecha_pago})",
+    )
+
+    response_serializer = ClienteDetalleCompletoSerializer(cuota.cliente)
+    return Response(response_serializer.data)
+
+
+# =============================================================================
 # 10. ELIMINAR/REVERTIR PAGO DE UNA CUOTA
 # POST /clientes/api/v2/cuotas/<id>/eliminar-pago/
 #
@@ -1028,6 +1067,112 @@ def eliminar_pago_cuota(request, cuota_id):
         titulo=f'Pago Eliminado - Cuota #{cuota.numero}',
         descripcion=f"Se eliminaron pagos por ${format_money(monto_eliminado)}. La cuota volvió a estado pendiente.",
         monto=str(int(monto_eliminado)),
+    )
+
+    response_serializer = ClienteDetalleCompletoSerializer(cliente)
+    return Response(response_serializer.data)
+
+
+# =============================================================================
+# 10b. ELIMINAR UN PAGO INDIVIDUAL DEL HISTORIAL (por id de Pago)
+# POST /clientes/api/v2/pagos/<pago_id>/eliminar/
+#
+# A diferencia de eliminar_pago_cuota (que revierte UNA cuota), aqui se elimina
+# un registro de Pago puntual del "Historial de Pagos Realizados".
+#
+# Un Pago de tipo 'cuota' se reparte entre varias cuotas y NO guarda el detalle
+# por cuota, por lo que no se puede revertir aisladamente. Como la distribucion
+# siempre llena las cuotas de menor a mayor numero (front-fill), el progreso
+# total solo depende del monto acumulado. Por eso, para revertir un pago basta
+# con restar su monto del progreso actual empezando por las ULTIMAS cuotas con
+# abono. El estado resultante es identico al de "total - monto" distribuido,
+# sin importar cual pago se borre, y sin re-aplicar pagos historicos (seguro
+# ante ampliaciones previas, que dejan pagos viejos en la base).
+#
+# Para 'cuota_sin_cronograma' simplemente se descuenta el monto del acumulado.
+# =============================================================================
+
+@api_view(['POST'])
+@transaction.atomic
+def eliminar_pago(request, pago_id):
+    try:
+        pago = Pago.objects.get(pk=pago_id)
+    except Pago.DoesNotExist:
+        return Response({'error': 'Pago no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+    cliente = pago.cliente
+    monto = parse_money(pago.monto)
+
+    # Los pagos de saldo total se revierten con su propio endpoint (restaura
+    # snapshot). Aqui solo se admiten pagos de cuota (con o sin cronograma).
+    if pago.tipo_pago not in ('cuota', 'cuota_sin_cronograma'):
+        return Response(
+            {'error': 'Este pago no se puede eliminar desde el historial. Use la opción correspondiente.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Si hay un pago de saldo total activo, los abonos de cuotas provienen de ese
+    # pago masivo: hay que revertir el saldo total primero.
+    tiene_saldo_total_activo = cliente.pagos.filter(
+        tipo_pago='saldo_total',
+        snapshot_saldo_total__isnull=False,
+    ).exists()
+    if tiene_saldo_total_activo:
+        return Response(
+            {'error': 'Este préstamo tiene un pago de saldo total activo. Revierta el pago de saldo total antes de eliminar pagos individuales.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # --- Eliminar el pago objetivo ---
+    pago.delete()
+
+    if pago.tipo_pago == 'cuota_sin_cronograma':
+        # Descontar del acumulado sin bajar de 0.
+        total_actual = parse_money(cliente.total_pagado_cuotas_sin_cronograma)
+        cliente.total_pagado_cuotas_sin_cronograma = str(int(max(0, total_actual - monto)))
+        saldo_total = parse_money(cliente.saldo_total_pagar)
+        if cliente.estado == 'pagado' and parse_money(cliente.total_pagado_cuotas_sin_cronograma) < saldo_total:
+            cliente.estado = 'vigente'
+        cliente.save()
+    else:
+        # --- Reversa local: quitar el monto del pago del progreso actual ---
+        # Se recorren las cuotas de mayor a menor numero, descontando el abono
+        # hasta cubrir el monto eliminado. Equivale a deshacer el front-fill.
+        restante = monto
+        for cuota in cliente.cuotas.order_by('-numero'):
+            if restante <= 0:
+                break
+            abonado = parse_money(cuota.abonado)
+            if abonado <= 0:
+                continue
+            quitar = min(abonado, restante)
+            nuevo_abonado = abonado - quitar
+            valor = parse_money(cuota.valor)
+            cuota.abonado = str(int(nuevo_abonado))
+            cuota.saldo = str(int(max(0, valor - nuevo_abonado)))
+            if nuevo_abonado <= 0:
+                cuota.estado_pago = 'pendiente'
+                cuota.descripcion = ''
+            elif nuevo_abonado >= valor:
+                cuota.estado_pago = 'pagado'
+            else:
+                cuota.estado_pago = 'parcial'
+            cuota.save()
+            restante -= quitar
+
+        # Recalcular estado del prestamo (sin tocar 'perdido').
+        if cliente.estado in ('vigente', 'pagado'):
+            pendientes = cliente.cuotas.exclude(estado_pago='pagado').count()
+            cliente.estado = 'pagado' if pendientes == 0 else 'vigente'
+            cliente.save()
+
+    # --- Evento historial ---
+    HistorialEvento.objects.create(
+        cliente=cliente,
+        tipo='eliminacion_pago',
+        titulo='Pago Eliminado',
+        descripcion=f"Se eliminó un pago de ${format_money(monto)} del historial. El préstamo se recalculó.",
+        monto=str(int(monto)),
     )
 
     response_serializer = ClienteDetalleCompletoSerializer(cliente)
@@ -1661,12 +1806,14 @@ def exportar_clientes_excel_v2(request):
     for c in clientes:
         cuotas = c.cuotas.all().order_by('numero')
 
-        # Mora historica registrada por vencimiento: cada pago de cuota guarda el
-        # vencimiento de la cuota en la que se debia y sus dias de mora.
+        # Mora historica registrada por vencimiento: cada pago de cuota guarda en
+        # fecha_pago_real el VENCIMIENTO de la cuota en la que se debia, junto con
+        # sus dias de mora. Se indexa por ese vencimiento para cruzarlo con
+        # cuota.fecha_pago al reconstruir el cronograma.
         mora_por_vencimiento = {}
         for pago in c.pagos.all():
-            if pago.tipo_pago == 'cuota' and pago.fecha_proximo_pago:
-                k = pago.fecha_proximo_pago
+            if pago.tipo_pago == 'cuota' and pago.fecha_pago_real:
+                k = pago.fecha_pago_real
                 mora_por_vencimiento[k] = max(mora_por_vencimiento.get(k, 0), pago.dias_mora or 0)
 
         def dias_mora_cuota(cuota):

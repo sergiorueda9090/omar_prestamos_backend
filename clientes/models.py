@@ -64,6 +64,10 @@ class Cuota(models.Model):
     cliente     = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="cuotas")
     numero      = models.PositiveIntegerField(default=0, help_text="Numero secuencial de la cuota (1, 2, 3...)")
     fecha_pago  = models.DateField()
+    fecha_proximo_pago = models.DateField(
+        null=True, blank=True,
+        help_text="Fecha que el cliente promete pagar (no cambia el vencimiento real fecha_pago). La mora = fecha_proximo_pago - fecha_pago",
+    )
     valor       = models.CharField(max_length=100)
     abonado     = models.CharField(max_length=100, default='0', help_text="Monto pagado en esta cuota")
     saldo       = models.CharField(max_length=100, default='0', help_text="Monto pendiente de esta cuota")
@@ -106,11 +110,12 @@ class Pago(models.Model):
     tipo_pago   = models.CharField(max_length=30, choices=TIPO_PAGO_CHOICES)
     monto       = models.CharField(max_length=100)
     fecha       = models.DateField()
-    # Fecha de vencimiento esperada (cuota en la que sigue debiendo) y fecha
-    # real en que se entrego el dinero. Permiten registrar la mora historica.
-    fecha_proximo_pago = models.DateField(null=True, blank=True, help_text="Fecha de vencimiento esperada de la cuota")
-    fecha_pago_real    = models.DateField(null=True, blank=True, help_text="Fecha real en que se realizo el pago")
-    dias_mora          = models.IntegerField(default=0, help_text="Dias de mora = fecha_pago_real - fecha_proximo_pago (minimo 0)")
+    # Fechas para el registro de la mora historica. Convencion alineada con el
+    # frontend: fecha_proximo_pago = referencia del pago (promesa del cliente u
+    # hoy); fecha_pago_real = vencimiento real de la cuota (cuota.fecha_pago).
+    fecha_proximo_pago = models.DateField(null=True, blank=True, help_text="Fecha de referencia del pago (promesa del cliente u hoy)")
+    fecha_pago_real    = models.DateField(null=True, blank=True, help_text="Vencimiento real de la cuota en la que se debia")
+    dias_mora          = models.IntegerField(default=0, help_text="Dias de mora = fecha_proximo_pago - fecha_pago_real (minimo 0)")
     descripcion = models.TextField(blank=True, default='')
     created_at  = models.DateTimeField(auto_now_add=True)
 

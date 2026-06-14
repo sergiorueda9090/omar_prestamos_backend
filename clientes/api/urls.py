@@ -48,8 +48,14 @@ urlpatterns = [
     # Cambiar fecha de cuota
     path('api/v2/cuotas/<int:cuota_id>/cambiar-fecha/',      views.cambiar_fecha_cuota,            name="cambiar_fecha_cuota"),
 
+    # Cambiar fecha proximo pago (promesa, no toca el vencimiento real)
+    path('api/v2/cuotas/<int:cuota_id>/cambiar-proximo-pago/', views.cambiar_fecha_proximo_pago,  name="cambiar_fecha_proximo_pago"),
+
     # Eliminar/revertir pago de una cuota
     path('api/v2/cuotas/<int:cuota_id>/eliminar-pago/',      views.eliminar_pago_cuota,            name="eliminar_pago_cuota"),
+
+    # Eliminar un pago individual del historial (por id de Pago) y recalcular
+    path('api/v2/pagos/<int:pago_id>/eliminar/',             views.eliminar_pago,                 name="eliminar_pago"),
 
     # Ampliar prestamo (liquidar + nuevo cronograma)
     path('api/v2/<int:cliente_id>/ampliar/',                 views.ampliar_prestamo,               name="ampliar_prestamo"),
