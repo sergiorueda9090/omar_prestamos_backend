@@ -205,9 +205,12 @@ def exportar_clientes_excel(request):
             # Si hay un pago registrado para su vencimiento, usa la mora historica.
             if cuota.fecha_pago in mora_por_vencimiento:
                 return mora_por_vencimiento[cuota.fecha_pago]
-            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy.
+            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy,
+            # tomando como referencia la promesa del cliente (fecha_proximo_pago)
+            # si existe, o el vencimiento original (fecha_pago) si no la hay.
             if cuota.estado_pago != 'pagado':
-                return max(0, (hoy - cuota.fecha_pago).days)
+                referencia = cuota.fecha_proximo_pago or cuota.fecha_pago
+                return max(0, (hoy - referencia).days)
             return 0
 
         if cuotas.exists():
@@ -524,6 +527,17 @@ def registrar_pago(request, cliente_id):
 
     if not distribucion:
         return Response({'error': 'No hay cuotas pendientes'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # --- Guardar fecha_proximo_pago en la cuota que quedo pendiente ---
+    # Despues del pago, la primera cuota que no quedo 'pagado' (la misma si fue
+    # parcial, o la siguiente del cronograma) recibe la promesa del cliente.
+    # Esto actualiza el panel "Fecha Proximo Pago" del UI, igual que hace
+    # cambiar_fecha_proximo_pago pero dentro de la misma transaccion del pago.
+    if fecha_proximo_pago:
+        siguiente_pendiente = cliente.cuotas.exclude(estado_pago='pagado').order_by('numero').first()
+        if siguiente_pendiente:
+            siguiente_pendiente.fecha_proximo_pago = fecha_proximo_pago
+            siguiente_pendiente.save(update_fields=['fecha_proximo_pago'])
 
     # --- Crear registro de pago ---
     desc_pago = f"Pago distribuido en cuota(s): {', '.join(['#' + str(d['numero']) for d in distribucion])}"
@@ -1820,9 +1834,12 @@ def exportar_clientes_excel_v2(request):
             # Si hay un pago registrado para su vencimiento, usa la mora historica.
             if cuota.fecha_pago in mora_por_vencimiento:
                 return mora_por_vencimiento[cuota.fecha_pago]
-            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy.
+            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy,
+            # tomando como referencia la promesa del cliente (fecha_proximo_pago)
+            # si existe, o el vencimiento original (fecha_pago) si no la hay.
             if cuota.estado_pago != 'pagado':
-                return max(0, (hoy - cuota.fecha_pago).days)
+                referencia = cuota.fecha_proximo_pago or cuota.fecha_pago
+                return max(0, (hoy - referencia).days)
             return 0
 
         for cuota in cuotas:

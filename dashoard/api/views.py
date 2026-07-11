@@ -201,9 +201,12 @@ def exportar_clientes_excel(request):
             # Si hay un pago registrado para su vencimiento, usa la mora historica.
             if cuota.fecha_pago in mora_por_vencimiento:
                 return mora_por_vencimiento[cuota.fecha_pago]
-            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy.
+            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy,
+            # tomando como referencia la promesa del cliente (fecha_proximo_pago)
+            # si existe, o el vencimiento original (fecha_pago) si no la hay.
             if cuota.estado_pago != 'pagado':
-                return max(0, (hoy - cuota.fecha_pago).days)
+                referencia = cuota.fecha_proximo_pago or cuota.fecha_pago
+                return max(0, (hoy - referencia).days)
             return 0
 
         if cuotas.exists():
@@ -1300,9 +1303,12 @@ def exportar_clientes_excel_v2(request):
             # Si hay un pago registrado para su vencimiento, usa la mora historica.
             if cuota.fecha_pago in mora_por_vencimiento:
                 return mora_por_vencimiento[cuota.fecha_pago]
-            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy.
+            # Si sigue pendiente/parcial y ya vencio, mora acumulada a hoy,
+            # tomando como referencia la promesa del cliente (fecha_proximo_pago)
+            # si existe, o el vencimiento original (fecha_pago) si no la hay.
             if cuota.estado_pago != 'pagado':
-                return max(0, (hoy - cuota.fecha_pago).days)
+                referencia = cuota.fecha_proximo_pago or cuota.fecha_pago
+                return max(0, (hoy - referencia).days)
             return 0
 
         for cuota in cuotas:
