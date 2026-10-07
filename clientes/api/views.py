@@ -19,6 +19,7 @@ from clientes.utils import (
     calcular_interes_simple,
     calcular_numero_cuotas,
     calcular_fechas_cobro,
+    avanzar_fecha_un_periodo,
     aplicar_saldo_favor,
     distribuir_pago_en_cuotas,
     format_money,
@@ -508,13 +509,16 @@ def registrar_pago(request, cliente_id):
     fecha_pago = request.data.get('fecha_pago', datetime.now().strftime('%Y-%m-%d'))
     descripcion = request.data.get('descripcion', '')
 
-    # Fechas para el registro de mora (convencion alineada con el frontend):
-    #   'fecha_proximo_pago' = referencia del pago (promesa del cliente u hoy);
-    #   'fecha_pago_real'    = vencimiento real de la cuota en la que se debia.
-    # dias_mora = max(0, fecha_proximo_pago - fecha_pago_real).
+    # Fechas para el registro de mora:
+    #   'fecha_pago'         = dia real en que el cliente esta pagando (hoy por defecto);
+    #   'fecha_pago_real'    = vencimiento real de la cuota en la que se debia;
+    #   'fecha_proximo_pago' = promesa del cliente para el SIGUIENTE ciclo (no
+    #                          participa en el calculo de mora de este pago,
+    #                          solo se guarda para el panel "Fecha Proximo Pago").
+    # dias_mora = max(0, fecha_pago - fecha_pago_real).
     fecha_proximo_pago = request.data.get('fecha_proximo_pago') or None
     fecha_pago_real = request.data.get('fecha_pago_real') or None
-    dias_mora = calcular_dias_mora(fecha_proximo_pago, fecha_pago_real)
+    dias_mora = calcular_dias_mora(fecha_pago, fecha_pago_real)
 
     if monto <= 0:
         return Response({'error': 'El monto debe ser mayor a 0'}, status=status.HTTP_400_BAD_REQUEST)
@@ -642,7 +646,11 @@ def registrar_pago_sin_cronograma(request, cliente_id):
 # 6. REGISTRAR PAGO DE INTERES
 # POST /clientes/api/v2/<id>/pagar-interes/
 #
-# Body: { "monto": "50000", "fecha": "2026-03-23", "descripcion": "Interés mora" }
+# Body: { "monto": "50000", "fecha": "2026-03-23", "descripcion": "Interés mora",
+#         "fecha_proximo_pago": "2026-04-01", "fecha_pago_real": "2026-03-20" }
+# (fecha_proximo_pago / fecha_pago_real son opcionales: igual que en el pago de
+# cuota, quedan registradas en el Pago para el historico de mora y la promesa
+# se guarda en la cuota pendiente.)
 #
 # Crea PagoInteres y suma al interes_acumulado del cliente.
 # =============================================================================
@@ -659,6 +667,14 @@ def registrar_pago_interes(request, cliente_id):
     fecha = request.data.get('fecha', datetime.now().strftime('%Y-%m-%d'))
     descripcion = request.data.get('descripcion', '')
 
+    # Mismas fechas de referencia que registrar_pago (cuota): dias_mora se
+    # calcula contra la fecha real del pago ('fecha'), no contra la promesa
+    # del siguiente ciclo ('fecha_proximo_pago'), para que fijar cuando se
+    # pagara despues no infle la mora de este pago.
+    fecha_proximo_pago = request.data.get('fecha_proximo_pago') or None
+    fecha_pago_real = request.data.get('fecha_pago_real') or None
+    dias_mora = calcular_dias_mora(fecha, fecha_pago_real)
+
     if monto <= 0:
         return Response({'error': 'El monto debe ser mayor a 0'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -674,7 +690,41 @@ def registrar_pago_interes(request, cliente_id):
     # --- Incrementar interes acumulado ---
     interes_actual = parse_money(cliente.interes_acumulado)
     cliente.interes_acumulado = str(int(interes_actual + monto))
+
+    # --- Cubrir el periodo y correr el vencimiento de las cuotas pendientes ---
+    # Pagar el interes COMPLETO de un periodo equivale a "comprar" ese ciclo sin
+    # pagar la cuota: el vencimiento (fecha_pago) de TODAS las cuotas pendientes
+    # se corre un periodo hacia adelante, para que no cuenten como mora.
+    #
+    # Si ya habia un saldo pendiente de un pago parcial anterior, este pago solo
+    # necesita cubrir ESE saldo (no un periodo completo nuevo encima) — varios
+    # pagos parciales se van acumulando hasta completar el periodo. Si no habia
+    # saldo pendiente, este pago debe cubrir el interes mensual completo.
+    saldo_pendiente_previo = parse_money(cliente.saldo_interes_pendiente)
+    total_requerido_periodo = saldo_pendiente_previo if saldo_pendiente_previo > 0 else parse_money(cliente.interes_mensual)
+
+    periodo_cubierto = total_requerido_periodo > 0 and monto >= total_requerido_periodo
+    cuotas_corridas = 0
+    if periodo_cubierto:
+        cliente.saldo_interes_pendiente = '0'
+        cuotas_a_correr = cliente.cuotas.exclude(estado_pago='pagado').order_by('numero')
+        for cuota in cuotas_a_correr:
+            cuota.fecha_pago = avanzar_fecha_un_periodo(cuota.fecha_pago, cliente.tipo_prestamo, cliente.dia_cobro)
+            cuota.save(update_fields=['fecha_pago'])
+            cuotas_corridas += 1
+    elif total_requerido_periodo > 0:
+        cliente.saldo_interes_pendiente = str(int(total_requerido_periodo - monto))
+
     cliente.save()
+
+    # --- Guardar fecha_proximo_pago en la cuota que sigue pendiente (igual
+    # que en registrar_pago), para que el panel "Fecha Proximo Pago" del UI
+    # quede sincronizado sin depender de una segunda llamada del frontend ---
+    if fecha_proximo_pago:
+        siguiente_pendiente = cliente.cuotas.exclude(estado_pago='pagado').order_by('numero').first()
+        if siguiente_pendiente:
+            siguiente_pendiente.fecha_proximo_pago = fecha_proximo_pago
+            siguiente_pendiente.save(update_fields=['fecha_proximo_pago'])
 
     # --- Crear registro de pago general ---
     Pago.objects.create(
@@ -682,17 +732,40 @@ def registrar_pago_interes(request, cliente_id):
         tipo_pago='interes',
         monto=str(int(monto)),
         fecha=fecha,
+        fecha_proximo_pago=fecha_proximo_pago,
+        fecha_pago_real=fecha_pago_real,
+        dias_mora=dias_mora,
         descripcion=descripcion or 'Pago de Interés',
     )
 
     # --- Evento historial ---
+    desc_historial = f"Pago de interés: ${format_money(monto)}. Se suma a las 3 utilidades."
+    if periodo_cubierto and cuotas_corridas:
+        desc_historial += " Interés del periodo cubierto por completo."
+    elif not periodo_cubierto and total_requerido_periodo > 0:
+        desc_historial += f" Interés parcial: queda ${format_money(parse_money(cliente.saldo_interes_pendiente))} pendiente del periodo."
+    if descripcion:
+        desc_historial += f" {descripcion}"
     HistorialEvento.objects.create(
         cliente=cliente,
         tipo='pago',
         titulo='Pago de Interés Registrado',
-        descripcion=f"Pago de interés: ${format_money(monto)}. Se suma a las 3 utilidades.{' ' + descripcion if descripcion else ''}",
+        descripcion=desc_historial,
         monto=str(int(monto)),
     )
+
+    # Evento separado para el corrimiento del cronograma, para que quede
+    # auditado por separado del pago (igual que cambiar_fecha_proximo_pago).
+    if periodo_cubierto and cuotas_corridas:
+        HistorialEvento.objects.create(
+            cliente=cliente,
+            tipo='cambio_fecha',
+            titulo='Vencimiento de Cuotas Corrido',
+            descripcion=(
+                f"Interés completo pagado: el vencimiento de {cuotas_corridas} cuota(s) "
+                f"pendiente(s) se corrió al siguiente periodo."
+            ),
+        )
 
     response_serializer = ClienteDetalleCompletoSerializer(cliente)
     return Response(response_serializer.data)

@@ -12,15 +12,20 @@ from dateutil.relativedelta import relativedelta
 # =============================================================================
 # CALCULAR DIAS DE MORA
 # =============================================================================
-# Convencion alineada con el frontend (panel "Opciones de Pago Rapido" y modales):
-#   - fecha_proximo_pago : fecha de REFERENCIA del pago (promesa del cliente u hoy).
-#   - fecha_pago_real    : VENCIMIENTO real de la cuota (cuota.fecha_pago).
+# Funcion generica: dias_mora = max(0, referencia - vencimiento).
 #
-# dias_mora = max(0, fecha_proximo_pago - fecha_pago_real)
-#           = max(0, referencia - vencimiento)
+# Uso en registrar_pago / registrar_pago_interes (views.py):
+#   - referencia  : fecha REAL en que se esta registrando el pago (columna
+#                   'fecha' del Pago, hoy por defecto).
+#   - vencimiento : VENCIMIENTO real de la cuota en la que se debia
+#                   (cuota.fecha_pago, enviado como 'fecha_pago_real').
 #
-# Es decir, cuantos dias DESPUES del vencimiento se paga/promete pagar. Si es
-# puntual o anticipado, o falta alguna fecha, retorna 0.
+# OJO: NO se usa 'fecha_proximo_pago' (la promesa del cliente para el
+# SIGUIENTE ciclo) como referencia — eso inflaria la mora del pago actual con
+# dias que aun no han pasado, solo por programar cuando se pagara despues.
+#
+# Es decir, cuantos dias DESPUES del vencimiento se esta pagando realmente. Si
+# es puntual o anticipado, o falta alguna fecha, retorna 0.
 # Acepta strings 'YYYY-MM-DD' o date/datetime.
 # =============================================================================
 
@@ -34,9 +39,9 @@ def _to_date(valor):
     return datetime.strptime(str(valor)[:10], '%Y-%m-%d').date()
 
 
-def calcular_dias_mora(fecha_proximo_pago, fecha_pago_real):
-    referencia = _to_date(fecha_proximo_pago)
-    vencimiento = _to_date(fecha_pago_real)
+def calcular_dias_mora(referencia, vencimiento):
+    referencia = _to_date(referencia)
+    vencimiento = _to_date(vencimiento)
     if referencia is None or vencimiento is None:
         return 0
     return max(0, (referencia - vencimiento).days)
@@ -167,6 +172,53 @@ def calcular_fechas_cobro(fecha_inicial, num_cuotas, tipo_prestamo, dia_cobro=No
         fechas.append(fecha_actual.strftime('%Y-%m-%d'))
 
     return fechas
+
+
+# =============================================================================
+# AVANZAR FECHA UN PERIODO
+# =============================================================================
+# Corre una sola fecha de vencimiento un periodo hacia adelante, segun la
+# frecuencia de pago del prestamo (mismo paso que usa calcular_fechas_cobro).
+#
+# Uso: cuando el cliente paga el INTERES COMPLETO de un periodo en vez de la
+# cuota (registrar_pago_interes), ese periodo queda cubierto y el vencimiento
+# de las cuotas pendientes se corre un ciclo, para que no cuenten como mora.
+#
+# Parametros:
+#   fecha          - Fecha de vencimiento actual (string "YYYY-MM-DD" o date)
+#   tipo_prestamo  - Tipo: "Mensual", "Quincenal", "Semanal", "Diario"
+#   dia_cobro      - Dia fijo de cobro (string "YYYY-MM-DD" o date, opcional)
+#
+# Retorna:
+#   date
+# =============================================================================
+
+def avanzar_fecha_un_periodo(fecha, tipo_prestamo, dia_cobro=None):
+    fecha_actual = _to_date(fecha)
+
+    dia_fijo = None
+    if dia_cobro:
+        dia_cobro_date = _to_date(dia_cobro)
+        if dia_cobro_date:
+            dia_fijo = dia_cobro_date.day
+
+    if tipo_prestamo == 'Mensual':
+        fecha_actual = fecha_actual + relativedelta(months=1)
+        if dia_fijo:
+            try:
+                fecha_actual = fecha_actual.replace(day=dia_fijo)
+            except ValueError:
+                pass
+    elif tipo_prestamo == 'Quincenal':
+        fecha_actual = fecha_actual + timedelta(days=15)
+    elif tipo_prestamo == 'Semanal':
+        fecha_actual = fecha_actual + timedelta(days=7)
+    elif tipo_prestamo == 'Diario':
+        fecha_actual = fecha_actual + timedelta(days=1)
+    else:
+        fecha_actual = fecha_actual + relativedelta(months=1)
+
+    return fecha_actual
 
 
 # =============================================================================

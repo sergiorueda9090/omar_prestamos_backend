@@ -46,6 +46,16 @@ class Cliente(models.Model):
         default='0',
         help_text="Suma de todos los pagos de interes registrados"
     )
+    saldo_interes_pendiente = models.CharField(
+        max_length=100,
+        default='0',
+        help_text=(
+            "Interes de un periodo que quedo sin cubrir por completo (pago de "
+            "interes parcial). Se exige junto con el interes del siguiente "
+            "periodo antes de considerar el periodo cubierto y correr el "
+            "vencimiento de las cuotas pendientes."
+        )
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
