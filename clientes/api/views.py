@@ -544,9 +544,9 @@ def registrar_pago(request, cliente_id):
             siguiente_pendiente.save(update_fields=['fecha_proximo_pago'])
 
     # --- Crear registro de pago ---
-    desc_pago = f"Pago distribuido en cuota(s): {', '.join(['#' + str(d['numero']) for d in distribucion])}"
-    if descripcion:
-        desc_pago += f". {descripcion}"
+    # La descripcion del Pago guarda solo lo que el usuario escribio (se
+    # muestra tal cual en "Historial de Pagos Realizados"); el detalle de
+    # distribucion entre cuotas queda en el evento del historial, mas abajo.
     Pago.objects.create(
         cliente=cliente,
         tipo_pago='cuota',
@@ -555,7 +555,7 @@ def registrar_pago(request, cliente_id):
         fecha_proximo_pago=fecha_proximo_pago,
         fecha_pago_real=fecha_pago_real,
         dias_mora=dias_mora,
-        descripcion=desc_pago,
+        descripcion=descripcion,
     )
 
     # --- Verificar si todas las cuotas estan pagadas ---
@@ -679,12 +679,14 @@ def registrar_pago_interes(request, cliente_id):
         return Response({'error': 'El monto debe ser mayor a 0'}, status=status.HTTP_400_BAD_REQUEST)
 
     # --- Crear PagoInteres ---
+    # descripcion guarda solo lo que el usuario escribio (se muestra tal cual
+    # en "Historial de Pagos Realizados").
     pago_interes = PagoInteres.objects.create(
         cliente=cliente,
         fecha=fecha,
         monto=str(int(monto)),
         tipo='interes',
-        descripcion=descripcion or 'Pago de Interés',
+        descripcion=descripcion,
     )
 
     # --- Incrementar interes acumulado ---
@@ -735,7 +737,7 @@ def registrar_pago_interes(request, cliente_id):
         fecha_proximo_pago=fecha_proximo_pago,
         fecha_pago_real=fecha_pago_real,
         dias_mora=dias_mora,
-        descripcion=descripcion or 'Pago de Interés',
+        descripcion=descripcion,
     )
 
     # --- Evento historial ---
@@ -903,15 +905,14 @@ def registrar_pago_saldo_total(request, cliente_id):
         cliente.save()
 
     # --- Crear registro de pago ---
-    desc_pago = f"Pago saldo total. Bruto: ${format_money(total_bruto)}, Abono previo: ${format_money(abono_total)}"
-    if descripcion:
-        desc_pago += f". {descripcion}"
+    # descripcion guarda solo lo que el usuario escribio; el detalle del
+    # calculo (bruto, abono previo) queda en el evento del historial, mas abajo.
     pago_creado = Pago.objects.create(
         cliente=cliente,
         tipo_pago='saldo_total',
         monto=str(int(total_a_pagar)),
         fecha=fecha_pago,
-        descripcion=desc_pago,
+        descripcion=descripcion,
     )
 
     # --- Persistir snapshot atado al Pago ---
@@ -1300,11 +1301,27 @@ def ampliar_prestamo(request, cliente_id):
     tasa_liquidacion_raw = request.data.get('tasa_liquidacion', None)
     plazo_liquidacion_raw = request.data.get('plazo_liquidacion', None)
 
+    # Fechas de la liquidacion que origina la ampliacion. Obligatorias, misma
+    # convencion que registrar_pago/registrar_pago_interes: fecha_pago = cuando
+    # el cliente realmente liquida; fecha_pago_real = vencimiento real de
+    # referencia; fecha_proximo_pago = promesa para el siguiente ciclo.
+    fecha_pago = request.data.get('fecha_pago') or None
+    fecha_proximo_pago = request.data.get('fecha_proximo_pago') or None
+    fecha_pago_real = request.data.get('fecha_pago_real') or None
+
     if monto_adicional <= 0 or nueva_tasa <= 0 or nuevas_cuotas_num <= 0:
         return Response(
             {'error': 'Monto adicional, tasa y número de cuotas deben ser mayores a 0'},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+    if not fecha_pago or not fecha_proximo_pago or not fecha_pago_real:
+        return Response(
+            {'error': 'Fecha del Pago, Fecha Próximo Pago y Fecha Pago Real son obligatorias'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    dias_mora = calcular_dias_mora(fecha_pago, fecha_pago_real)
 
     capital_anterior = parse_money(cliente.monto_prestamo)
 
@@ -1463,10 +1480,17 @@ def ampliar_prestamo(request, cliente_id):
 
     cliente.save()
 
+    # --- Guardar fecha_proximo_pago (promesa del cliente) en la primera cuota
+    # pendiente del nuevo cronograma, igual que hace registrar_pago. ---
+    siguiente_pendiente = cliente.cuotas.exclude(estado_pago='pagado').order_by('numero').first()
+    if siguiente_pendiente:
+        siguiente_pendiente.fecha_proximo_pago = fecha_proximo_pago
+        siguiente_pendiente.save(update_fields=['fecha_proximo_pago'])
+
     # --- Crear PagoInteres de liquidacion ---
     PagoInteres.objects.create(
         cliente=cliente,
-        fecha=datetime.now().strftime('%Y-%m-%d'),
+        fecha=fecha_pago,
         monto=str(int(interes_liquidacion)),
         tipo='liquidacion',
         descripcion='Interés de Liquidación',
@@ -1480,6 +1504,10 @@ def ampliar_prestamo(request, cliente_id):
         nuevas_cuotas=nuevas_cuotas_num,
         capital_anterior=str(int(capital_anterior)),
         capital_nuevo=str(int(nuevo_capital)),
+        fecha_pago=fecha_pago,
+        fecha_proximo_pago=fecha_proximo_pago,
+        fecha_pago_real=fecha_pago_real,
+        dias_mora=dias_mora,
         interes_liquidacion=str(int(interes_liquidacion)),
         saldo_favor=str(int(max(0, saldo_favor))),
     )

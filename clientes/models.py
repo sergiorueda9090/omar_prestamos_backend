@@ -207,6 +207,14 @@ class Ampliacion(models.Model):
     interes_liquidacion = models.CharField(max_length=100)
     saldo_favor         = models.CharField(max_length=100)
     fecha               = models.DateTimeField(auto_now_add=True)
+    # Fechas de referencia del pago de liquidacion que origina la ampliacion,
+    # con la misma convencion usada en Pago: fecha_pago = cuando el cliente
+    # realmente paga/liquida; fecha_pago_real = vencimiento real de referencia;
+    # fecha_proximo_pago = promesa del cliente para el siguiente ciclo.
+    fecha_pago          = models.DateField(null=True, blank=True, help_text="Fecha en que el cliente realizo la liquidacion/ampliacion")
+    fecha_proximo_pago  = models.DateField(null=True, blank=True, help_text="Fecha que el cliente promete pagar tras la ampliacion")
+    fecha_pago_real     = models.DateField(null=True, blank=True, help_text="Vencimiento real de referencia para el calculo de mora")
+    dias_mora           = models.IntegerField(default=0, help_text="Dias de mora = fecha_pago - fecha_pago_real (minimo 0)")
 
     def __str__(self):
         return f"Ampliacion {self.fecha} - +${self.monto_adicional}"
